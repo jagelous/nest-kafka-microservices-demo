@@ -1,9 +1,10 @@
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { Kafka, Consumer, EachMessagePayload } from 'kafkajs';
 
-const TOPIC = 'product-events';
-const GROUP_ID = 'nest-kafka-crud-consumer';
+const TOPIC = process.env.KAFKA_TOPIC || 'product-events';
+const GROUP_ID = process.env.KAFKA_CONSUMER_GROUP_ID || 'nest-kafka-crud-consumer';
 const BROKERS = (process.env.KAFKA_BROKERS || 'localhost:9092').split(',');
+const CLIENT_ID = process.env.KAFKA_CONSUMER_CLIENT_ID || 'nest-kafka-crud-consumer';
 
 @Injectable()
 export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
@@ -12,7 +13,7 @@ export class KafkaConsumerService implements OnModuleInit, OnModuleDestroy {
 
   constructor() {
     this.kafka = new Kafka({
-      clientId: 'nest-kafka-crud-consumer',
+      clientId: CLIENT_ID,
       brokers: BROKERS,
     });
     this.consumer = this.kafka.consumer({ groupId: GROUP_ID });

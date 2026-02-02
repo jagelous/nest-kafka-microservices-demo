@@ -1,8 +1,9 @@
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { Kafka, Producer } from 'kafkajs';
 
-const TOPIC = 'product-events';
+const TOPIC = process.env.KAFKA_TOPIC || 'product-events';
 const BROKERS = (process.env.KAFKA_BROKERS || 'localhost:9092').split(',');
+const CLIENT_ID = process.env.KAFKA_PRODUCER_CLIENT_ID || 'nest-kafka-crud-producer';
 
 @Injectable()
 export class KafkaProducerService implements OnModuleInit, OnModuleDestroy {
@@ -11,7 +12,7 @@ export class KafkaProducerService implements OnModuleInit, OnModuleDestroy {
 
   constructor() {
     this.kafka = new Kafka({
-      clientId: 'nest-kafka-crud-producer',
+      clientId: CLIENT_ID,
       brokers: BROKERS,
     });
     this.producer = this.kafka.producer();
