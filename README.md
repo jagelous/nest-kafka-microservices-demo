@@ -55,9 +55,9 @@ src/
 │       ├── create-product.dto.ts
 │       └── update-product.dto.ts
 └── kafka/
-    ├── kafka.module.ts          # Global module: producer + consumer
-    ├── kafka-producer.service.ts
-    └── kafka-consumer.service.ts
+    ├── kafka.module.ts          # @Global() module: provides producer/consumer to all modules
+    ├── kafka-producer.service.ts  # Produces events to Kafka topic
+    └── kafka-consumer.service.ts  # Consumes events from Kafka topic
 ```
 
 ---
@@ -67,9 +67,31 @@ src/
 ### 1. NestJS and TypeScript
 
 - **NestJS** uses **modules** to group controllers and services. Each feature (e.g. products, kafka) lives in its own module.
-- **Controllers** define HTTP routes and call **services** for business logic.
-- **DTOs** (Data Transfer Objects) describe the shape of request bodies (`CreateProductDto`, `UpdateProductDto`).
-- **Entities** describe domain models (e.g. `Product` with `id`, `name`, `description`, `price`, timestamps).
+  - `ProductsModule`: Contains product-related controllers and services
+  - `KafkaModule`: Global module (`@Global()`) that provides Kafka producer/consumer services to all modules
+  - `AppModule`: Root module that imports all feature modules
+
+- **Controllers** (`ProductsController`): 
+  - Define HTTP routes (GET, POST, PATCH, DELETE)
+  - Handle request/response
+  - Call services for business logic
+  - Use DTOs for request validation
+
+- **Services** (`ProductsService`): 
+  - Contain business logic
+  - Handle data operations (CRUD)
+  - Inject dependencies (like `KafkaProducerService`)
+  - Emit events to Kafka after operations
+
+- **DTOs** (Data Transfer Objects): 
+  - `CreateProductDto`: Validates incoming data for creating products (all fields required)
+  - `UpdateProductDto`: Validates incoming data for updating products (all fields optional)
+  - Use `class-validator` decorators (`@IsString()`, `@IsNumber()`, `@Min()`, etc.) for validation
+  - `ValidationPipe` (in `main.ts`) automatically validates requests against DTOs
+
+- **Entities**: 
+  - `Product` interface: Internal domain model with `id`, `name`, `description`, `price`, `createdAt`, `updatedAt`
+  - Different from DTOs - entities include server-generated fields (id, timestamps)
 
 ### 2. CRUD Flow
 
@@ -85,9 +107,25 @@ Data is kept in an in-memory `Map` for simplicity. In production you would use a
 
 ### 3. Kafka Integration
 
-- **Producer** (`KafkaProducerService`): Connects on app startup, sends messages to topic `product-events`. Message key = event type; value = JSON `{ type, payload, timestamp }`.
-- **Consumer** (`KafkaConsumerService`): Subscribes to `product-events` with group `nest-kafka-crud-consumer`, and for each message logs the event (simulating a downstream microservice).
-- **Brokers**: Configurable via `KAFKA_BROKERS` (default `localhost:9092`). Topic is auto-created if the broker allows it (`KAFKA_AUTO_CREATE_TOPICS_ENABLE=true` in docker-compose).
+- **Producer** (`KafkaProducerService`): 
+  - Connects to Kafka on app startup (`OnModuleInit`)
+  - Sends messages to topic `product-events` (configurable via `KAFKA_TOPIC`)
+  - Message structure: `key` = event type (e.g., `product.created`), `value` = JSON `{ type, payload, timestamp }`
+  - Client ID configurable via `KAFKA_PRODUCER_CLIENT_ID`
+  
+- **Consumer** (`KafkaConsumerService`): 
+  - Subscribes to `product-events` topic on app startup
+  - Uses consumer group ID (configurable via `KAFKA_CONSUMER_GROUP_ID`) for load balancing
+  - Reads from beginning (`fromBeginning: true`) - processes all existing messages
+  - For each message, logs the event (simulating a downstream microservice that could update search index, send notifications, etc.)
+  - Client ID configurable via `KAFKA_CONSUMER_CLIENT_ID`
+
+- **KafkaModule**: 
+  - Marked as `@Global()` - imported once in `AppModule`, available everywhere
+  - Exports `KafkaProducerService` for use in other modules (like `ProductsModule`)
+  - Automatically starts producer and consumer connections when app starts
+
+- **Brokers**: Configurable via `KAFKA_BROKERS` environment variable (default `localhost:9092`). Supports comma-separated list for multiple brokers. Topic is auto-created if the broker allows it (`KAFKA_AUTO_CREATE_TOPICS_ENABLE=true` in docker-compose).
 
 ### 4. Why This Is “Microservices-Style”
 
@@ -111,27 +149,50 @@ Data is kept in an in-memory `Map` for simplicity. In production you would use a
 
 ```bash
 npm install
+# or
+yarn install
 ```
 
-### 2. Start Kafka (Docker)
+### 2. Configure Environment Variables (Optional)
+
+Create a `.env` file in the root directory (see [Environment Variables](#environment-variables) section for details). The app will work with defaults, but you can customize Kafka brokers, topic names, client IDs, etc.
+
+### 3. Start Kafka (Docker)
 
 ```bash
 docker-compose up -d
 ```
 
-Wait a few seconds for Kafka to be ready. Optional: create topic manually if auto-create is disabled:
+This starts:
+- **Zookeeper** (port 2181) - Required for Kafka coordination
+- **Kafka** (port 9092) - Message broker
+
+Wait 10-15 seconds for Kafka to be ready. You can check if it's running:
+
+```bash
+docker-compose ps
+```
+
+**Note**: The topic `product-events` will be auto-created when the first message is sent (because `KAFKA_AUTO_CREATE_TOPICS_ENABLE=true` in docker-compose). If you want to create it manually:
 
 ```bash
 docker-compose exec kafka kafka-topics --create --topic product-events --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1
 ```
 
-### 3. Start the NestJS app
+### 4. Start the NestJS app
 
 ```bash
 npm run start:dev
 ```
 
 The API runs at **http://localhost:3000/api**.
+
+**What happens on startup:**
+1. NestJS loads environment variables from `.env` (via `ConfigModule`)
+2. `KafkaProducerService` connects to Kafka broker
+3. `KafkaConsumerService` connects to Kafka and subscribes to `product-events` topic
+4. HTTP server starts listening on port 3000 (or `PORT` from `.env`)
+5. You'll see console logs confirming Kafka connections and consumer subscription
 
 ---
 
@@ -180,11 +241,83 @@ Consumer logs `product.deleted`.
 
 ---
 
-## Environment
+## Troubleshooting
+
+### Kafka Connection Issues
+
+**Error**: `ECONNREFUSED` or `Connection timeout`
+- **Solution**: Make sure Kafka is running: `docker-compose ps`
+- Start Kafka: `docker-compose up -d`
+- Wait 10-15 seconds for Kafka to fully start
+- Check Kafka logs: `docker-compose logs kafka`
+
+**Error**: `Topic does not exist`
+- **Solution**: The topic should auto-create. If not, create manually:
+  ```bash
+  docker-compose exec kafka kafka-topics --create --topic product-events --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1
+  ```
+
+### Port Already in Use
+
+**Error**: `Port 3000 is already in use`
+- **Solution**: Change `PORT` in `.env` file or stop the process using port 3000
+
+### Validation Errors
+
+**Error**: `400 Bad Request` with validation messages
+- **Solution**: Check that request body matches DTO requirements:
+  - `name`: Required string, min length 1
+  - `description`: Required string
+  - `price`: Required number, minimum 0
+
+### Module Import Errors
+
+**Error**: `Nest can't resolve dependencies`
+- **Solution**: Make sure `KafkaModule` is imported in `AppModule` (it's `@Global()` so it only needs to be imported once)
+
+---
+
+## Environment Variables
+
+The application uses a `.env` file for configuration. Create one in the root directory with the following variables:
+
+### Kafka Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `KAFKA_BROKERS` | `localhost:9092` | Comma-separated Kafka broker list |
+| `KAFKA_BROKERS` | `localhost:9092` | Comma-separated list of Kafka broker addresses (e.g., `localhost:9092,localhost:9093`) |
+| `KAFKA_TOPIC` | `product-events` | Kafka topic name where product events are published |
+| `KAFKA_PRODUCER_CLIENT_ID` | `nest-kafka-crud-producer` | Client identifier for the Kafka producer (appears in Kafka logs/metrics) |
+| `KAFKA_CONSUMER_CLIENT_ID` | `nest-kafka-crud-consumer` | Client identifier for the Kafka consumer (appears in Kafka logs/metrics) |
+| `KAFKA_CONSUMER_GROUP_ID` | `nest-kafka-crud-consumer` | Consumer group ID for load balancing and offset tracking |
+
+### Application Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `3000` | Port where the NestJS application listens |
+| `NODE_ENV` | `development` | Environment mode (`development` or `production`) |
+
+### Example `.env` File
+
+```env
+# Kafka Configuration
+KAFKA_BROKERS=localhost:9092
+KAFKA_TOPIC=product-events
+
+# Kafka Producer Configuration
+KAFKA_PRODUCER_CLIENT_ID=nest-kafka-crud-producer
+
+# Kafka Consumer Configuration
+KAFKA_CONSUMER_CLIENT_ID=nest-kafka-crud-consumer
+KAFKA_CONSUMER_GROUP_ID=nest-kafka-crud-consumer
+
+# Application Configuration
+PORT=3000
+NODE_ENV=development
+```
+
+**Note**: All environment variables have defaults in the code, so the `.env` file is optional but recommended for easy configuration.
 
 ---
 
@@ -192,19 +325,52 @@ Consumer logs `product.deleted`.
 
 | Command | Description |
 |---------|-------------|
-| `npm run build` | Compile TypeScript to `dist/` |
-| `npm run start` | Run compiled app |
-| `npm run start:dev` | Run with watch mode (recommended for development) |
-| `npm run start:prod` | Run production build (`node dist/main`) |
+| `npm run build` | Compile TypeScript to `dist/` directory |
+| `npm run start` | Run compiled app from `dist/` (must run `build` first) |
+| `npm run start:dev` | Run with watch mode - auto-restarts on file changes (recommended for development) |
+| `npm run start:debug` | Run with debug mode - enables debugging with breakpoints |
+| `npm run start:prod` | Run production build (`node dist/main`) - optimized for production |
+
+**Development workflow:**
+```bash
+npm run start:dev  # Use this during development
+```
 
 ---
 
 ## Extending the Demo
 
-- **Database**: Add TypeORM or Prisma, replace the in-memory `Map` in `ProductsService` with repository calls.
-- **Second microservice**: Create another NestJS app that only runs `KafkaConsumerService` (and maybe its own API), consuming `product-events` and building a search index or analytics.
-- **Validation**: Use `class-validator` and `class-transformer` on DTOs and enable `ValidationPipe` in `main.ts`.
-- **Kafka partition key**: Use product `id` as key for ordered per-product processing.
+### Database Integration
+- Replace the in-memory `Map` in `ProductsService` with a real database:
+  - **TypeORM**: `npm install @nestjs/typeorm typeorm pg` (PostgreSQL)
+  - **Prisma**: `npm install prisma @prisma/client` + `npx prisma init`
+  - Update `ProductsService` to use repository/Prisma client instead of `Map`
+
+### Separate Microservices
+- Create a second NestJS app that only consumes Kafka events:
+  - Copy `KafkaModule` and `KafkaConsumerService`
+  - Remove `ProductsModule` (no REST API needed)
+  - Consumer could update a search index (Elasticsearch), send emails, sync to another database, etc.
+
+### Enhanced Validation
+- Already implemented: `class-validator` decorators on DTOs + `ValidationPipe` in `main.ts`
+- Add more validators: `@IsEmail()`, `@MaxLength()`, `@Matches()` for regex patterns
+- Custom validators: Create your own validation classes
+
+### Kafka Advanced Features
+- **Partition key**: Use product `id` as message key for ordered per-product processing
+- **Multiple topics**: Create separate topics for different event types
+- **Error handling**: Add retry logic, dead letter queue for failed messages
+- **Schema registry**: Use Avro/JSON Schema for message validation (Confluent Schema Registry)
+
+### Authentication & Authorization
+- Add JWT authentication: `npm install @nestjs/jwt @nestjs/passport passport passport-jwt`
+- Protect routes with guards: `@UseGuards(JwtAuthGuard)`
+
+### Testing
+- Unit tests: `npm install --save-dev @nestjs/testing`
+- E2E tests: Test API endpoints with `supertest`
+- Kafka tests: Use `kafkajs` test utilities or mock Kafka
 
 ---
 
